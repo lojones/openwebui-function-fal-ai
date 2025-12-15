@@ -1,7 +1,7 @@
 """
 title: Fal.ai Z-Image Turbo Pipe
 description: A pipe to generate images using fal.ai's z-image/turbo model.
-author: User
+author: Login Jones
 version: 1.0.0
 license: MIT
 requirements: fal-client, python-dotenv
