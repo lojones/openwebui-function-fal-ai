@@ -1,8 +1,8 @@
 """
-title: Fal.ai Z-Image Turbo Pipe
-description: A pipe to generate images using fal.ai's z-image/turbo model.
-author: Login Jones
-version: 1.0.0
+title: Fal.ai Master Image Generator
+description: A unified pipe to generate images using various Fal.ai models. Use the 'Custom' option to test new models defined in the MODEL_ID Valve.
+author: User
+version: 1.1.0
 license: MIT
 requirements: fal-client, python-dotenv
 environment_variables: FAL_KEY
@@ -14,29 +14,38 @@ from typing import List, Callable, Awaitable
 from pydantic import BaseModel, Field
 import fal_client
 
+
 class Pipe:
     class Valves(BaseModel):
-        FAL_KEY: str = Field(
-            default="",
-            description="API Key for Fal.ai (required)"
+        FAL_KEY: str = Field(default="", description="API Key for Fal.ai (required)")
+        MODEL_ID: str = Field(
+            default="fal-ai/flux-pro/v1.1-ultra",
+            description="Default/Custom Model ID. Used ONLY if you select 'Fal.ai Custom' or if the selected model is not found.",
         )
-        WIDTH: int = Field(
-            default=832,
-            description="Image width"
+        # Dimensions for models that use exact pixels
+        WIDTH: int = Field(default=800, description="Width")
+        HEIGHT: int = Field(default=1422, description="Height")
+        # Aspect Ratio for models that use ratios
+        ASPECT_RATIO: str = Field(
+            default="16:9",
+            description="Aspect Ratio. Options: 16:9, 1:1, 9:16, 4:3, 3:4",
         )
-        HEIGHT: int = Field(
-            default=1216,
-            description="Image height"
+        # Model-Specific settings
+        STYLE: str = Field(
+            default="realistic_image", description="Style (Recraft only)"
+        )
+        RAW: bool = Field(default=False, description="Raw Mode (Flux Ultra only)")
+        NUM_INFERENCE_STEPS: int = Field(
+            default=28, description="Inference Steps (Hunyuan only)"
         )
         ENABLE_SAFETY_CHECKER: bool = Field(
-            default=False,
-            description="Enable safety checker"
+            default=False, description="Enable Safety Checker"
         )
 
     def __init__(self):
         self.type = "manifold"
-        self.id = "falai-z-image-turbo"
-        self.name = "Fal.ai: "
+        self.id = "falai-master"
+        self.name = "Fal.ai Master: "
         self.valves = self.Valves()
         self.emitter: Callable[[dict], Awaitable[None]] | None = None
 
@@ -47,7 +56,19 @@ class Pipe:
             )
 
     def pipes(self) -> List[dict]:
-        return [{"id": "falai-z-image-turbo", "name": "Fal.ai Z-Image Turbo"}]
+        return [
+            {"id": "falai-flux-ultra", "name": "IMG: Flux Ultra"},
+            {"id": "falai-flux-2-pro", "name": "IMG: Flux 2 Pro"},
+            {"id": "falai-recraft-v3", "name": "IMG: Recraft v3"},
+            {"id": "falai-seedream", "name": "IMG: SeaDream"},
+            {"id": "falai-hunyuan", "name": "IMG: Hunyuan"},
+            {"id": "falai-imagen4", "name": "IMG: Imagen 4"},
+            {"id": "falai-z-image", "name": "IMG: Z-Image Turbo"},
+            {
+                "id": "falai-custom",
+                "name": "Fal.ai Custom (Use Valve)",
+            },  # <--- ADDED THIS
+        ]
 
     async def pipe(
         self,
@@ -55,76 +76,135 @@ class Pipe:
         __event_emitter__: Callable[[dict], Awaitable[None]] = None,
     ) -> str:
         self.emitter = __event_emitter__
-        
-        # 1. Get the prompt from the last user message
+
+        # 1. Determine Model ID
+        request_model_id = body.get("model", "")
+
+        # Map internal IDs to Fal API IDs
+        model_map = {
+            "falai-flux-ultra": "fal-ai/flux-pro/v1.1-ultra",
+            "falai-flux-2-pro": "fal-ai/flux-2-pro",
+            "falai-recraft-v3": "fal-ai/recraft/v3/text-to-image",
+            "falai-seedream": "fal-ai/bytedance/seedream/v4.5/text-to-image",
+            "falai-hunyuan": "fal-ai/hunyuan-image/v3/text-to-image",
+            "falai-imagen4": "fal-ai/imagen4/preview/fast",
+            "falai-z-image": "fal-ai/z-image/turbo",
+            # Note: "falai-custom" is NOT here, so it falls through to the Valve
+        }
+
+        # If ID is in map, use it. If not (e.g. "falai-custom"), use the Valve value.
+        api_model_id = model_map.get(request_model_id, self.valves.MODEL_ID)
+
+        # 2. Get Prompt
         messages = body.get("messages", [])
         if not messages:
             return "Error: No messages found."
-            
-        # Extract the last user message content
+
         prompt = ""
         for msg in reversed(messages):
             if msg.get("role") == "user":
                 content = msg.get("content")
                 if isinstance(content, list):
-                    # Handle multimodal content (text + images), extract text parts
-                    text_parts = []
-                    for part in content:
-                        if part.get("type") == "text":
-                            text_parts.append(part.get("text", ""))
+                    text_parts = [
+                        p.get("text", "") for p in content if p.get("type") == "text"
+                    ]
                     prompt = " ".join(text_parts).strip()
                 elif isinstance(content, str):
                     prompt = content
                 break
-        
+
         if not prompt:
-             return "Error: No prompt found in the last user message."
+            return "Error: No prompt found."
 
-        # 2. Setup Configuration from Valves
+        # 3. Setup Env
         if not self.valves.FAL_KEY:
-            return "Error: FAL_KEY not set in valves. Please configure it in the function settings."
-
-        # Set the API key for fal_client (fal_client checks os.environ or takes it directly, 
-        # but setting os.environ is the safest way to ensure the library picks it up globally)
+            return "Error: FAL_KEY not set in valves."
         os.environ["FAL_KEY"] = self.valves.FAL_KEY
-        
-        # 3. Call Fal.ai API
-        await self.emit_status("🎨 Generating image with Fal.ai...")
-        
+
+        # 4. Construct Arguments
+        arguments = {
+            "prompt": prompt,
+            "enable_safety_checker": self.valves.ENABLE_SAFETY_CHECKER,
+        }
+
+        # --- Helper for Recraft ---
+        def get_recraft_size(ratio):
+            mapping = {
+                "1:1": "square_hd",
+                "16:9": "landscape_16_9",
+                "9:16": "portrait_16_9",
+                "4:3": "landscape_4_3",
+                "3:4": "portrait_4_3",
+            }
+            return mapping.get(ratio, "square_hd")
+
+        # --- Logic Branches ---
+        # We check if the api_model_id string contains known keywords
+
+        if "recraft" in api_model_id:
+            arguments["image_size"] = get_recraft_size(self.valves.ASPECT_RATIO)
+            arguments["style"] = self.valves.STYLE
+
+        elif "flux-pro/v1.1-ultra" in api_model_id:
+            arguments["aspect_ratio"] = self.valves.ASPECT_RATIO
+            arguments["raw"] = self.valves.RAW
+            arguments["output_format"] = "jpeg"
+
+        elif "imagen4" in api_model_id:
+            arguments["aspect_ratio"] = self.valves.ASPECT_RATIO
+
+        elif "hunyuan" in api_model_id:
+            arguments["image_size"] = {
+                "width": self.valves.WIDTH,
+                "height": self.valves.HEIGHT,
+            }
+            arguments["num_inference_steps"] = self.valves.NUM_INFERENCE_STEPS
+
+        elif "flux-2-pro" in api_model_id:
+            arguments["width"] = self.valves.WIDTH
+            arguments["height"] = self.valves.HEIGHT
+            arguments["output_format"] = "jpeg"
+
+        elif "seedream" in api_model_id or "z-image" in api_model_id:
+            arguments["image_size"] = {
+                "width": self.valves.WIDTH,
+                "height": self.valves.HEIGHT,
+            }
+
+        else:
+            # CUSTOM/Fallback Logic
+            # If we are using a custom model from the Valve, we default to sending
+            # the generic "image_size" object as it's the most common Fal pattern.
+            arguments["image_size"] = {
+                "width": self.valves.WIDTH,
+                "height": self.valves.HEIGHT,
+            }
+
+        # 5. Call API
+        await self.emit_status(f"🎨 Generating with {api_model_id}...")
+
         try:
-            # We run the blocking fal_client.submit in a separate thread to not block the async loop
             loop = asyncio.get_running_loop()
-            
+
             def run_fal_generation():
                 handler = fal_client.submit(
-                    "fal-ai/z-image/turbo",
-                    arguments={
-                        "prompt": prompt,
-                        "enable_safety_checker": self.valves.ENABLE_SAFETY_CHECKER,
-                        "image_size": {
-                            "width": self.valves.WIDTH,
-                            "height": self.valves.HEIGHT
-                        }
-                    },
+                    api_model_id,
+                    arguments=arguments,
                 )
                 return handler.get()
 
             result = await loop.run_in_executor(None, run_fal_generation)
-            
-            # 4. Process Result
-            if result and 'images' in result and len(result['images']) > 0:
-                image_url = result['images'][0].get('url', '')
+
+            if result and "images" in result and len(result["images"]) > 0:
+                image_url = result["images"][0].get("url", "")
                 if image_url:
-                    await self.emit_status("✅ Image generated successfully", done=True)
-                    # Return markdown image syntax
+                    await self.emit_status("✅ Generated successfully", done=True)
                     return f"![Generated Image]({image_url})"
                 else:
-                    await self.emit_status("❌ Failed to retrieve image URL", done=True)
-                    return "Error: Image generated but URL was missing."
+                    return "Error: Image URL missing."
             else:
-                 await self.emit_status("❌ Generation failed or empty result", done=True)
-                 return f"Error: Generation failed. Result: {result}"
+                return f"Error: Generation failed. Result: {result}"
 
         except Exception as e:
             await self.emit_status(f"❌ Error: {str(e)}", done=True)
-            return f"Error generating image: {e}"
+            return f"Error: {e}"
