@@ -14,25 +14,19 @@ from typing import List, Callable, Awaitable, AsyncGenerator
 from pydantic import BaseModel, Field
 import fal_client
 
+
 class Pipe:
     class Valves(BaseModel):
         FAL_KEY: str = Field(default="", description="API Key for Fal.ai (required)")
         # Dimensions for models that use exact pixels (Flux 2, Hunyuan, SeaDream, Z-Image)
-        WIDTH: int = Field(default=1024, description="Width")
-        HEIGHT: int = Field(default=1024, description="Height")
+        WIDTH: int = Field(default=800, description="Width")
+        HEIGHT: int = Field(default=1422, description="Height")
         # Aspect Ratio for models that use ratios (Flux Ultra, Imagen 4, Recraft)
         ASPECT_RATIO: str = Field(
-            default="16:9",
+            default="9:16",
             description="Aspect Ratio. Options: 16:9, 1:1, 9:16, 4:3, 3:4",
         )
-        # Model-Specific settings
-        STYLE: str = Field(
-            default="realistic_image", description="Style (Recraft only)"
-        )
-        RAW: bool = Field(default=False, description="Raw Mode (Flux Ultra only)")
-        NUM_INFERENCE_STEPS: int = Field(
-            default=28, description="Inference Steps (Hunyuan only)"
-        )
+
         ENABLE_SAFETY_CHECKER: bool = Field(
             default=False, description="Enable Safety Checker"
         )
@@ -61,7 +55,6 @@ class Pipe:
 
     def pipes(self) -> List[dict]:
         return [
-            {"id": "falai-flux-ultra", "name": "IMG: Flux Ultra"},
             {"id": "falai-flux-2-pro", "name": "IMG: Flux 2 Pro"},
             {"id": "falai-recraft-v3", "name": "IMG: Recraft v3"},
             {"id": "falai-seedream", "name": "IMG: SeaDream"},
@@ -79,10 +72,9 @@ class Pipe:
 
         # 1. Determine Model ID
         request_model_id = body.get("model", "")
-        
+
         # Map internal IDs to Fal API IDs
         model_map = {
-            "falai-flux-ultra": "fal-ai/flux-pro/v1.1-ultra",
             "falai-flux-2-pro": "fal-ai/flux-2-pro",
             "falai-recraft-v3": "fal-ai/recraft/v3/text-to-image",
             "falai-seedream": "fal-ai/bytedance/seedream/v4.5/text-to-image",
@@ -98,7 +90,7 @@ class Pipe:
             if internal_id in request_model_id:
                 api_model_id = external_id
                 break
-        
+
         # If no match found, return ERROR immediately
         if not api_model_id:
             yield f"**Error:** The selected model (`{request_model_id}`) is not supported by the Fal.ai Master Pipe.\n\nPlease select one of the **IMG:** models from the dropdown list."
@@ -115,7 +107,9 @@ class Pipe:
             if msg.get("role") == "user":
                 content = msg.get("content")
                 if isinstance(content, list):
-                    text_parts = [p.get("text", "") for p in content if p.get("type") == "text"]
+                    text_parts = [
+                        p.get("text", "") for p in content if p.get("type") == "text"
+                    ]
                     prompt = " ".join(text_parts).strip()
                 elif isinstance(content, str):
                     prompt = content
@@ -137,36 +131,16 @@ class Pipe:
             "enable_safety_checker": self.valves.ENABLE_SAFETY_CHECKER,
         }
 
-        # Helper for Recraft aspect ratios
-        def get_recraft_size(ratio):
-            mapping = {
-                "1:1": "square_hd", "16:9": "landscape_16_9", "9:16": "portrait_16_9",
-                "4:3": "landscape_4_3", "3:4": "portrait_4_3",
-            }
-            return mapping.get(ratio, "square_hd")
-
         # Logic Branches based on selected model
-        if "recraft" in api_model_id:
-            arguments["image_size"] = get_recraft_size(self.valves.ASPECT_RATIO)
-            arguments["style"] = self.valves.STYLE
-        elif "flux-pro/v1.1-ultra" in api_model_id:
+
+        if "imagen4" in api_model_id:
             arguments["aspect_ratio"] = self.valves.ASPECT_RATIO
-            arguments["raw"] = self.valves.RAW
-            arguments["output_format"] = "jpeg"
-        elif "imagen4" in api_model_id:
-            arguments["aspect_ratio"] = self.valves.ASPECT_RATIO
-        elif "hunyuan" in api_model_id:
-            arguments["image_size"] = {"width": self.valves.WIDTH, "height": self.valves.HEIGHT}
-            arguments["num_inference_steps"] = self.valves.NUM_INFERENCE_STEPS
-        elif "flux-2-pro" in api_model_id:
-            arguments["width"] = self.valves.WIDTH
-            arguments["height"] = self.valves.HEIGHT
-            arguments["output_format"] = "jpeg"
-        elif "seedream" in api_model_id or "z-image" in api_model_id:
-            arguments["image_size"] = {"width": self.valves.WIDTH, "height": self.valves.HEIGHT}
-        else:
+        else: 
             # Fallback for known models that might not have a specific block above
-            arguments["image_size"] = {"width": self.valves.WIDTH, "height": self.valves.HEIGHT}
+            arguments["image_size"] = {
+                "width": self.valves.WIDTH,
+                "height": self.valves.HEIGHT,
+            }
 
         # 5. Call API
         await self.emit_status(f"Generating image with {api_model_id}...", done=False)
